@@ -368,8 +368,8 @@ with tab1:
                             """, unsafe_allow_html=True)
                             
                             #Store pending event(s) in session state
-                            if not hasattr(st.session_state, 'pending_events') or not isinstance(st.session_state.pending_events, list):
-                                st.session_state.pending_events = []
+                            # Reset pending_events for new input (prevents duplicates)
+                            st.session_state.pending_events = []
                             st.session_state.pending_events.append(event)
                             
                             st.session_state.messages.append({
@@ -409,10 +409,17 @@ with tab1:
                     saved_count = 0
                     # Save all valid events
                     for pending in pending_events:
-                        if is_event_saveable(pending):
-                            # Remove validation metadata before saving
-                            clean_event = {k: v for k, v in pending.items() 
-                                         if k not in ['is_valid', 'missing_fields', 'auto_filled']}
+                        # CRITICAL: Clean FIRST, then validate (matches edit flow)
+                        clean_event = {k: v for k, v in pending.items() 
+                                     if k not in ['is_valid', 'missing_fields', 'auto_filled']}
+                        
+                        # Replace placeholder "-" with None for validation
+                        for key in ['date', 'time', 'description', 'attendees', 'location']:
+                            if clean_event.get(key) == '-':
+                                clean_event[key] = None
+                        
+                        # Now validate the clean data
+                        if is_event_saveable(clean_event):
                             add_event(clean_event, SESSION_EVENTS_FILE)
                             saved_count += 1
                     
@@ -431,6 +438,7 @@ with tab1:
                     
                 except Exception as e:
                     st.error(f"❌ เกิดข้อผิดพลาดในการบันทึก: {str(e)}")
+        
         
         with col2:
             if st.button("✏️ แก้ไข", key="confirm_edit_btn", use_container_width=True):
@@ -490,6 +498,8 @@ with tab1:
                     if is_event_saveable(updated_event):
                         add_event(updated_event, SESSION_EVENTS_FILE)  # Save to session file!
                         st.success("✅ บันทึกการแก้ไขสำเร็จ!")
+                        # Clear all pending states
+                        st.session_state.pending_events = []
                         st.session_state.pending_event = None
                         st.session_state.show_edit_form = False
                         st.rerun()
