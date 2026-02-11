@@ -196,7 +196,8 @@ with st.sidebar:
         st.markdown(f"**{total_text}**")
         st.markdown("---")
         
-        for event in sorted(events, key=lambda x: x.get('date') or '9999-99-99'):
+        
+        for idx, event in enumerate(sorted(events, key=lambda x: x.get('date') or '9999-99-99')):
             desc = event.get('description') or 'No description'
             event_date = event.get('date', 'No date')
             event_time = event.get('time', '')
@@ -216,12 +217,12 @@ with st.sidebar:
             # Buttons to view full details or delete
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("🔍 View", key=f"view_{event['id']}", use_container_width=True):
+                if st.button("🔍 View", key=f"view_{idx}_{event['id']}", use_container_width=True):
                     st.session_state.selected_event = event
                     st.session_state.editing_in_modal = None  # Reset edit mode
                     st.rerun()
             with col2:
-                if st.button("🗑️ Delete", key=f"del_{event['id']}", use_container_width=True, type="secondary"):
+                if st.button("🗑️ Delete", key=f"del_{idx}_{event['id']}", use_container_width=True, type="secondary"):
                     delete_event(event['id'], SESSION_EVENTS_FILE)
                     st.success("Event deleted!")
                     st.rerun()
