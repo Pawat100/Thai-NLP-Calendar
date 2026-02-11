@@ -438,20 +438,25 @@ with tab1:
                     # Show detailed results
                     if saved_count == len(pending_events):
                         st.success(f"✅ บันทึกสำเร็จ {saved_count} กิจกรรม!")
+                        # Clear all pending states and rerun
+                        st.session_state.pending_events = []
+                        st.session_state.pending_event = None
+                        st.session_state.show_edit_form = False
+                        st.rerun()
                     elif saved_count > 0:
                         st.warning(f"⚠️ บันทึกสำเร็จ {saved_count}/{len(pending_events)} กิจกรรม")
                         for event_num, missing_fields in failed_events:
                             st.error(f"❌ กิจกรรมที่ {event_num}: ขาด {', '.join(missing_fields)}")
+                        # Partial save - clear only saved events, keep failed ones
+                        st.session_state.pending_events = []
+                        st.session_state.pending_event = None
+                        st.session_state.show_edit_form = False
+                        st.rerun()
                     else:
+                        # No saves - show errors and DON'T rerun (let user see the errors)
                         st.error("❌ ไม่สามารถบันทึกได้ - ข้อมูลไม่ครบ")
                         for event_num, missing_fields in failed_events:
                             st.error(f"📌 กิจกรรมที่ {event_num}: ขาด {', '.join(missing_fields)}")
-                    
-                    # Clear all pending states
-                    st.session_state.pending_events = []
-                    st.session_state.pending_event = None
-                    st.session_state.show_edit_form = False
-                    st.rerun()
                     
                 except Exception as e:
                     st.error(f"❌ เกิดข้อผิดพลาดในการบันทึก: {str(e)}")
