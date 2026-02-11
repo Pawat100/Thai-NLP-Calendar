@@ -407,8 +407,10 @@ with tab1:
                     from nlp_utils import add_event
                     
                     saved_count = 0
+                    failed_events = []
+                    
                     # Save all valid events
-                    for pending in pending_events:
+                    for idx, pending in enumerate(pending_events, 1):
                         # CRITICAL: Clean FIRST, then validate (matches edit flow)
                         clean_event = {k: v for k, v in pending.items() 
                                      if k not in ['is_valid', 'missing_fields', 'auto_filled']}
@@ -422,13 +424,28 @@ with tab1:
                         if is_event_saveable(clean_event):
                             add_event(clean_event, SESSION_EVENTS_FILE)
                             saved_count += 1
+                        else:
+                            # Track which fields are missing
+                            missing = []
+                            if not clean_event.get('date'):
+                                missing.append('วันที่')
+                            if not clean_event.get('time'):
+                                missing.append('เวลา')
+                            if not clean_event.get('description'):
+                                missing.append('กิจกรรม')
+                            failed_events.append((idx, missing))
                     
+                    # Show detailed results
                     if saved_count == len(pending_events):
                         st.success(f"✅ บันทึกสำเร็จ {saved_count} กิจกรรม!")
                     elif saved_count > 0:
                         st.warning(f"⚠️ บันทึกสำเร็จ {saved_count}/{len(pending_events)} กิจกรรม")
+                        for event_num, missing_fields in failed_events:
+                            st.error(f"❌ กิจกรรมที่ {event_num}: ขาด {', '.join(missing_fields)}")
                     else:
                         st.error("❌ ไม่สามารถบันทึกได้ - ข้อมูลไม่ครบ")
+                        for event_num, missing_fields in failed_events:
+                            st.error(f"📌 กิจกรรมที่ {event_num}: ขาด {', '.join(missing_fields)}")
                     
                     # Clear all pending states
                     st.session_state.pending_events = []
@@ -438,6 +455,7 @@ with tab1:
                     
                 except Exception as e:
                     st.error(f"❌ เกิดข้อผิดพลาดในการบันทึก: {str(e)}")
+        
         
         
         with col2:
