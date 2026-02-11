@@ -501,9 +501,24 @@ def extract_slots(text: str, nlp_model=None) -> Dict[str, any]:
     if not slots['description']:
         # List of common activity keywords
         activity_keywords = [
+            # Meetings & work
             'ประชุม', 'meeting', 'นัด', 'เจอ', 'พบ',
             'เรียน', 'สอบ', 'นำเสนอ', 'presentation',
-            'สัมมนา', 'workshop', 'ส่งงาน', 'รายงาน'
+            'สัมมนา', 'workshop', 'ส่งงาน', 'รายงาน',
+            
+            # Food & dining
+            'กินข้าว', 'กินอาหาร', 'ทานข้าว', 'ทานอาหาร',
+            'อาหาร', 'มื้อ', 'เลี้ยง', 'ดินเนอร์',
+            
+            # Social activities
+            'เที่ยว', 'ไปเที่ยว', 'ไปเดิน', 'ช้อปปิ้ง', 'ดูหนัง',
+            'ดูคอนเสิร์ต', 'งานปาร์ตี้', 'ปาร์ตี้',
+            
+            # Health & wellness
+            'หมอ', 'คลินิก', 'รักษา', 'ตรวจ', 'โรงพยาบาล',
+            
+            # Sports & fitness
+            'ออกกำลังกาย', 'ฟิตเนส', 'วิ่ง', 'ว่ายน้ำ', 'โยคะ',
         ]
         
         for keyword in activity_keywords:
@@ -585,6 +600,25 @@ def extract_slots(text: str, nlp_model=None) -> Dict[str, any]:
             
             if unique_names:
                 slots['attendees'] = ', '.join(unique_names[:2])  # Max 2 names
+    
+    # STEP 5.5: Pattern-based GENERIC PERSON detection (if no specific names found)
+    if not slots['attendees']:
+        generic_people = []
+        
+        # Pattern 1: "กับ" + generic person term
+        generic_person_pattern = r'กับ\s*(เพื่อน|แฟน|พี่|น้อง|พ่อ|แม่|ลูก|สามี|ภรรยา|เจ้านาย|หัวหน้า|ทีม|เพื่อนร่วมงาน|คนรัก|แฟนสาว|แฟนหนุ่ม)'
+        matches = re.findall(generic_person_pattern, normalized_text)
+        generic_people.extend(matches)
+        
+        # Pattern 2: generic person + action verbs (พบ, เจอ, etc.)
+        person_action_pattern = r'(เพื่อน|แฟน|พี่|น้อง)\s*(?:ไป|มา|พบ|เจอ|นัด)'
+        matches = re.findall(person_action_pattern, normalized_text)
+        generic_people.extend(matches)
+        
+        if generic_people:
+            # Remove duplicates while preserving order
+            unique_people = list(dict.fromkeys(generic_people))
+            slots['attendees'] = ', '.join(unique_people[:2])  # Max 2
     
     # STEP 6: Pattern-based LOCATION detection  
     if not slots['location']:
