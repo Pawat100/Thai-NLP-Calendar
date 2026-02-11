@@ -401,7 +401,7 @@ with tab1:
         col1, col2, col3 = st.columns([1, 1, 2])
         
         with col1:
-            if st.button("✅ บันทึกทั้งหมด", use_container_width=True, type="primary"):
+            if st.button("✅ บันทึกทั้งหมด", key="confirm_save_all_btn", use_container_width=True, type="primary"):
                 from validation import is_event_saveable
                 from nlp_utils import add_event
                 
@@ -427,12 +427,12 @@ with tab1:
                 st.rerun()
         
         with col2:
-            if st.button("✏️ แก้ไข", use_container_width=True):
+            if st.button("✏️ แก้ไข", key="confirm_edit_btn", use_container_width=True):
                 st.session_state.show_edit_form = True
                 st.session_state.pending_event = pending_events[0]  # Edit first event
         
         with col3:
-            if st.button("❌ ยกเลิก", use_container_width=True):
+            if st.button("❌ ยกเลิก", key="confirm_cancel_btn", use_container_width=True):
                 st.session_state.pending_events = []
                 st.session_state.pending_event = None
                 st.rerun()
