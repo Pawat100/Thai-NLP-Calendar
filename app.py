@@ -548,12 +548,12 @@ with tab2:
                     hidden_count = len(day_events) - MAX_EVENTS_SHOWN
                     
                     # Create clickable buttons for visible events
-                    for event in visible_events:
+                    for event_idx, event in enumerate(visible_events):
                         time_str = event.get('time', '')
                         desc = (event.get('description') or 'Event')[:15]
                         button_label = f"🔔 {time_str} {desc}"
                         
-                        if st.button(button_label, key=f"cal_event_{event['id']}_{date_str}", use_container_width=True, type="secondary"):
+                        if st.button(button_label, key=f"cal_event_{event_idx}_{event['id']}_{date_str}", use_container_width=True, type="secondary"):
                             st.session_state.selected_event = event
                             st.rerun()
                     
