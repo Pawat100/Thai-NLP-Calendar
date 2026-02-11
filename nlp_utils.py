@@ -666,9 +666,11 @@ def extract_slots(text: str, nlp_model=None) -> Dict[str, any]:
                         slots['location'] = location_text.strip()[:30]
                     break
     
-    # Convert attendees list to string
+    # Convert attendees list to string (only if it's a list)
     if slots['attendees']:
-        slots['attendees'] = ', '.join(slots['attendees'])
+        if isinstance(slots['attendees'], list):
+            slots['attendees'] = ', '.join(slots['attendees'])
+        # If it's already a string (from generic person detection), leave it as is
     else:
         slots['attendees'] = None
     
