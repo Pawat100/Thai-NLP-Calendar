@@ -443,6 +443,9 @@ with tab1:
             with st.form("edit_event_form"):
                 from datetime import datetime
                 
+                # Get the pending event from session state
+                pending = st.session_state.get('pending_event', {})
+                
                 # Parse date for date_input
                 try:
                     date_val = datetime.strptime(pending.get('date', ''), '%Y-%m-%d').date() if pending.get('date') else None
