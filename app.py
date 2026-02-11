@@ -402,29 +402,35 @@ with tab1:
         
         with col1:
             if st.button("✅ บันทึกทั้งหมด", key="confirm_save_all_btn", use_container_width=True, type="primary"):
-                from validation import is_event_saveable
-                from nlp_utils import add_event
-                
-                saved_count = 0
-                # Save all valid events
-                for pending in pending_events:
-                    if is_event_saveable(pending):
-                        # Remove validation metadata before saving
-                        clean_event = {k: v for k, v in pending.items() 
-                                     if k not in ['is_valid', 'missing_fields', 'auto_filled']}
-                        add_event(clean_event, SESSION_EVENTS_FILE)
-                        saved_count += 1
-                
-                if saved_count == len(pending_events):
-                    st.success(f"✅ บันทึกสำเร็จ {saved_count} กิจกรรม!")
-                elif saved_count > 0:
-                    st.warning(f"⚠️ บันทึกสำเร็จ {saved_count}/{len(pending_events)} กิจกรรม")
-                else:
-                    st.error("❌ ไม่สามารถบันทึกได้ - ข้อมูลไม่ครบ")
-                
-                st.session_state.pending_events = []
-                st.session_state.pending_event = None  # Clear old single event too
-                st.rerun()
+                try:
+                    from validation import is_event_saveable
+                    from nlp_utils import add_event
+                    
+                    saved_count = 0
+                    # Save all valid events
+                    for pending in pending_events:
+                        if is_event_saveable(pending):
+                            # Remove validation metadata before saving
+                            clean_event = {k: v for k, v in pending.items() 
+                                         if k not in ['is_valid', 'missing_fields', 'auto_filled']}
+                            add_event(clean_event, SESSION_EVENTS_FILE)
+                            saved_count += 1
+                    
+                    if saved_count == len(pending_events):
+                        st.success(f"✅ บันทึกสำเร็จ {saved_count} กิจกรรม!")
+                    elif saved_count > 0:
+                        st.warning(f"⚠️ บันทึกสำเร็จ {saved_count}/{len(pending_events)} กิจกรรม")
+                    else:
+                        st.error("❌ ไม่สามารถบันทึกได้ - ข้อมูลไม่ครบ")
+                    
+                    # Clear all pending states
+                    st.session_state.pending_events = []
+                    st.session_state.pending_event = None
+                    st.session_state.show_edit_form = False
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ เกิดข้อผิดพลาดในการบันทึก: {str(e)}")
         
         with col2:
             if st.button("✏️ แก้ไข", key="confirm_edit_btn", use_container_width=True):
