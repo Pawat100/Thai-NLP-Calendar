@@ -530,8 +530,57 @@ with tab1:
                         st.error("❌ กรุณาระบุทั้งวันที่และกิจกรรม")
 
 with tab2:
-    # Calendar view
-    st.subheader(f"📅 {cal.month_name[st.session_state.current_month]} {st.session_state.current_year}")
+    # Calendar navigation bar (directly on the Calendar tab)
+    nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns([1, 3, 3, 1, 2])
+    
+    with nav_col1:
+        if st.button("◀", key="cal_prev_month", use_container_width=True):
+            st.session_state.current_month -= 1
+            if st.session_state.current_month < 1:
+                st.session_state.current_month = 12
+                st.session_state.current_year -= 1
+            st.rerun()
+    
+    with nav_col2:
+        month_names = [cal.month_name[m] for m in range(1, 13)]
+        selected_month = st.selectbox(
+            "Month", month_names,
+            index=st.session_state.current_month - 1,
+            key="cal_month_select", label_visibility="collapsed"
+        )
+        new_month = month_names.index(selected_month) + 1
+        if new_month != st.session_state.current_month:
+            st.session_state.current_month = new_month
+            st.rerun()
+    
+    with nav_col3:
+        now = get_current_datetime()
+        year_range = list(range(now.year - 5, now.year + 6))
+        selected_year = st.selectbox(
+            "Year", year_range,
+            index=year_range.index(st.session_state.current_year) if st.session_state.current_year in year_range else 5,
+            key="cal_year_select", label_visibility="collapsed"
+        )
+        if selected_year != st.session_state.current_year:
+            st.session_state.current_year = selected_year
+            st.rerun()
+    
+    with nav_col4:
+        if st.button("▶", key="cal_next_month", use_container_width=True):
+            st.session_state.current_month += 1
+            if st.session_state.current_month > 12:
+                st.session_state.current_month = 1
+                st.session_state.current_year += 1
+            st.rerun()
+    
+    with nav_col5:
+        if st.button("📍 Today", key="cal_today_btn", use_container_width=True):
+            now = get_current_datetime()
+            st.session_state.current_month = now.month
+            st.session_state.current_year = now.year
+            st.rerun()
+    
+    st.markdown("---")
     
     # Load events for display
     events = load_events(SESSION_EVENTS_FILE)
