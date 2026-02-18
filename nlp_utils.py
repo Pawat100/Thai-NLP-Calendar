@@ -250,13 +250,14 @@ def parse_thai_date(date_str: str, reference_date: Optional[datetime] = None) ->
             # Check if year is also specified (2-digit or 4-digit)
             if len(numbers) >= 2:
                 year_candidate = int(numbers[1])
-                # Handle 2-digit year (assume 2500+ for Buddhist era, 20xx for Christian era)
+                # Handle 2-digit year: always treat as B.E. (พ.ศ.) short form
+                # e.g. "69" → B.E. 2569 → C.E. 2026
                 if year_candidate < 100:
-                    if year_candidate >= 50:
-                        year = 2000 + year_candidate
-                    else:
-                        year = 2500 + year_candidate  # Buddhist era
-                elif year_candidate > 2500:  # Buddhist year
+                    current_be_year = reference_date.year + 543
+                    current_be_century = (current_be_year // 100) * 100  # e.g. 2500
+                    be_year = current_be_century + year_candidate
+                    year = be_year - 543
+                elif year_candidate > 2500:  # Full Buddhist year (e.g. 2569)
                     year = year_candidate - 543
                 else:
                     year = year_candidate
