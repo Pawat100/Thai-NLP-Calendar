@@ -246,10 +246,12 @@ def parse_thai_date(date_str: str, reference_date: Optional[datetime] = None) ->
         if thai_month in date_str:
             day = int(numbers[0]) if numbers else 1
             year = reference_date.year
+            year_specified = False  # Track if user gave an explicit year
             
             # Check if year is also specified (2-digit or 4-digit)
             if len(numbers) >= 2:
                 year_candidate = int(numbers[1])
+                year_specified = True
                 # Handle 2-digit year: always treat as B.E. (พ.ศ.) short form
                 # e.g. "69" → B.E. 2569 → C.E. 2026
                 if year_candidate < 100:
@@ -264,7 +266,8 @@ def parse_thai_date(date_str: str, reference_date: Optional[datetime] = None) ->
             
             try:
                 target_date = datetime(year, month_num, day, tzinfo=TZ)
-                if target_date < reference_date:
+                # Only auto-advance to next year if user did NOT specify a year
+                if not year_specified and target_date < reference_date:
                     target_date = datetime(year + 1, month_num, day, tzinfo=TZ)
                 return target_date.strftime('%Y-%m-%d')
             except ValueError:
