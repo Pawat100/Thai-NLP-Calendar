@@ -1,703 +1,803 @@
 """
-Thai NLP Chatbot with Calendar Integration
-Streamlit App for Event Extraction
+NLP Utilities for Thai Calendar Event Extraction
+
+This module provides functions extracted from THENLP.ipynb for use in the Streamlit app.
+Includes NER, POS validation, slot mapping, and date/time parsing.
 """
 
-import streamlit as st
-import pandas as pd
-from datetime import datetime, timedelta
-import calendar as cal
+import spacy
+import json
+import re
 import uuid
-from nlp_utils import (
-    load_ner_model,
-    normalize_thai_text,
-    extract_slots,
-    extract_multiple_events,
-    create_event,
-    load_events,
-    save_events,
-    add_event,
-    delete_event,
-    update_event,
-    get_current_datetime,
-    process_text_to_event
-)
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional
+import pytz
+try:
+    from pythainlp import normalize
+    import dateparser
+except ImportError:
+    print("Warning: pythainlp or dateparser not installed")
 
-# Generate unique session ID for this user
-if 'session_id' not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4().hex[:12])
+# Constants
+TZ = pytz.timezone('Asia/Bangkok')
+EVENTS_FILE = "events.json"
 
-# Session-specific events file
-SESSION_EVENTS_FILE = f"events_{st.session_state.session_id}.json"
+# Global NLP model (loaded once)
+_nlp_model = None
 
-# Page configuration
-st.set_page_config(
-    page_title="Thai NLP Calendar Chatbot",
-    page_icon="📅",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# =========================
+# Normalization Dictionaries (from NLP_PROJECT.ipynb)
+# =========================
 
-# Initialize session state FIRST
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
+SLANG_DICT = {
+    # 📅 วัน / วันที่
+    "พน.": "พรุ่งนี้",
+    "พน": "พรุ่งนี้",
+    "มะรืน": "วันถัดไป",
+    "มะลืนนี้": "วันถัดไป",
+    "มะวาน": "เมื่อวาน",
+    
+    # ⏰ ช่วงเวลา (Intent)
+    "ตอนเช้า": "ช่วงเช้า",
+    "เช้า": "ช่วงเช้า",
+    "ตอนสาย": "ช่วงสาย",
+    "สาย": "ช่วงสาย",
+    "ตอนบ่าย": "ช่วงบ่าย",
+    "บ่าย": "ช่วงบ่าย",
+    "ตอนเย็น": "ช่วงเย็น",
+    "เย็น": "ช่วงเย็น",
+    "ตอนค่ำ": "ช่วงค่ำ",
+    "ค่ำ": "ช่วงค่ำ",
+    "ตอนดึก": "ช่วงดึก",
+    "ดึก": "ช่วงดึก",
+    
+    # 🕒 เวลา
+    "เที่ยง": "12:00",
+    "เที่ยงคืน": "00:00",
+    "บ่ายโมง": "13:00",
+    "บ่ายสอง": "14:00",
+    "บ่ายสาม": "15:00",
+    "บ่ายสี่": "16:00",
+    "บ่ายห้า": "17:00",
+    "หกโมงเย็น": "18:00",
+    "หนึ่งทุ่ม": "19:00",
+    "สองทุ่ม": "20:00",
+    "สามทุ่ม": "21:00",
+    
+    # 👤 บุคคล
+    "จาร": "อาจารย์",
+    "อจ": "อาจารย์",
+    "อ.": "อาจารย์",
+    "บอส": "ผู้บังคับบัญชา",
+    "หัวหน้า": "ผู้บังคับบัญชา",
+    
+    # 🗣️ กริยา
+    "นัดเจอ": "นัดพบ",
+    "เจอกัน": "พบ",
+    "ไปหา": "ไปพบ",
+    "เข้าไปหา": "ไปพบ",
+    "คุยงาน": "ประชุม",
+    "เข้าไปคุย": "ประชุม",
+    "เลื่อนนัด": "เลื่อน",
+    "ยกเลิกนัด": "ยกเลิก",
+    
+    # 🏫 สถานที่
+    "มทร.": "มหาวิทยาลัย",
+    "มทร": "มหาวิทยาลัย",
+    "มอ": "มหาวิทยาลัย",
+    "มหาลับ": "มหาวิทยาลัย",
+    "ราชมงคลพระนคร": "มหาวิทยาลัย",
+    "rmutp": "มหาวิทยาลัย",
+    "ตึกเรียน": "อาคารเรียน",
+    "ตึก": "อาคาร",
+    
+    # 🎓 คณะ
+    "คณะวิศวะ": "คณะวิศวกรรมศาสตร์",
+    "วิศวะ": "คณะวิศวกรรมศาสตร์",
+    "คณะบริหาร": "คณะบริหารธุรกิจ",
+    "บริหาร": "คณะบริหารธุรกิจ",
+    "คณะไอที": "คณะเทคโนโลยีสารสนเทศ",
+    "ไอที": "คณะเทคโนโลยีสารสนเทศ",
+}
 
-if 'nlp_model' not in st.session_state:
-    with st.spinner('Loading NLP model...'):
-        st.session_state.nlp_model = load_ner_model()
+LOANWORD_DICT = {
+    # กิจกรรม
+    "video call": "โทร",
+    "google meet": "ออนไลน์",
+    "ms teams": "ออนไลน์",
+    "meeting": "ประชุม",
+    "meet": "ประชุม",
+    "mtg": "ประชุม",
+    "meetup": "ประชุม",
+    "briefing": "ชี้แจง",
+    "brief": "ชี้แจง",
+    "presentation": "นำเสนอ",
+    "present": "นำเสนอ",
+    "review": "ทบทวน",
+    "report": "รายงาน",
+    "update": "อัปเดต",
+    
+    # เวลา
+    "tomorrow": "พรุ่งนี้",
+    "today": "วันนี้",
+    "tonight": "คืนนี้",
+    "morning": "ช่วงเช้า",
+    "afternoon": "ช่วงบ่าย",
+    "evening": "ช่วงเย็น",
+    
+    # ออนไลน์
+    "zoom": "ออนไลน์",
+    "online": "ออนไลน์",
+}
 
-if 'current_month' not in st.session_state:
-    now = get_current_datetime()
-    st.session_state.current_month = now.month
-    st.session_state.current_year = now.year
+SPLIT_WORD_CORRECTION = {
+    ("มหา", "ลับ"): "มหาวิทยาลัย",
+    ("มหา", "ลัย"): "มหาวิทยาลัย",
+    ("วิศ", "วะ"): "คณะวิศวกรรมศาสตร์",
+    ("วิศว", "ะ"): "คณะวิศวกรรมศาสตร์",
+    ("โรง", "บาล"): "โรงพยาบาล",
+    ("ตอน", "เช้า"): "ช่วงเช้า",
+    ("ตอน", "สาย"): "ช่วงสาย",
+    ("ตอน", "บ่าย"): "ช่วงบ่าย",
+    ("ตอน", "เย็น"): "ช่วงเย็น",
+}
 
-if 'enlarged_view' not in st.session_state:
-    st.session_state.enlarged_view = False
 
-if 'selected_event' not in st.session_state:
-    st.session_state.selected_event = None
+def load_ner_model(model_path: str = "./my_ner_model"):
+    """
+    Load spaCy NER model
+    """
+    global _nlp_model
+    
+    if _nlp_model is not None:
+        return _nlp_model
+    
+    try:
+        _nlp_model = spacy.load(model_path)
+        print(f"✓ Loaded model from {model_path}")
+    except OSError:
+        print(f"⚠ Model not found at {model_path}, creating blank model")
+        _nlp_model = spacy.blank("th")
+        ner = _nlp_model.add_pipe("ner")
+        for label in ["DATE", "TIME", "ACTIVITY", "EVENT", "PERSON", "LOCATION"]:
+            ner.add_label(label)
+    
+    return _nlp_model
 
-if 'editing_event_id' not in st.session_state:
-    st.session_state.editing_event_id = None
 
-if 'editing_in_modal' not in st.session_state:
-    st.session_state.editing_in_modal = None
+def normalize_thai_text(text: str) -> str:
+    """
+    Normalize Thai text using pythainlp and custom dictionaries
+    Applies: Unicode normalization, slang normalization, loanword conversion
+    """
+    # Step 1: Basic unicode normalization
+    try:
+        text = normalize(text)
+    except:
+        pass
+    
+    # Step 2: Lowercase for matching
+    text_lower = text.lower()
+    
+    # Step 3: Apply loanword dictionary (case-insensitive)
+    for loanword, thai_word in LOANWORD_DICT.items():
+        text_lower = text_lower.replace(loanword.lower(), thai_word)
+    
+    # Step 4: Apply slang dictionary
+    for slang, formal in SLANG_DICT.items():
+        text_lower = text_lower.replace(slang, formal)
+    
+    # Step 5: Whitespace cleanup
+    text_lower = re.sub(r'\s+', ' ', text_lower).strip()
+    
+    return text_lower
 
-# Custom CSS - with larger sidebar and modern calendar design
-st.markdown("""
-<style>
-    /* Larger sidebar text */
-    [data-testid="stSidebar"] {
-        font-size: 1.1rem;
-    }
-    [data-testid="stSidebar"] .stButton button {
-        font-size: 1.1rem;
-    }
-    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-        font-size: 1.4rem;
+
+def get_current_datetime():
+    """Get current datetime in Bangkok timezone"""
+    return datetime.now(TZ)
+
+
+def parse_thai_date(date_str: str, reference_date: Optional[datetime] = None) -> Optional[str]:
+    """
+    Parse Thai date expressions to YYYY-MM-DD format
+    Enhanced to handle complex formats like "Monday 10 Jan 69"
+    """
+    if not date_str:
+        return None
+    
+    if reference_date is None:
+        reference_date = get_current_datetime()
+    
+    date_str = date_str.strip().lower()
+    
+    # Thai relative dates
+    thai_relative_dates = {
+        'วันนี้': 0,
+        'พรุ่งนี้': 1,
+        'มะรืนนี้': 2,
+        'วันถัดไป': 2,
+        'เ มื่อวาน': -1,
+        'เมื่อวานนี้': -1,
+        'เมื่อวานซืน': -2,
+        'วานนี้': -1,
     }
     
-    .stChatMessage {
-        padding: 1rem;
-        border-radius: 0.5rem;
-    }
-    .event-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1.5rem;
-        border-radius: 1rem;
-        margin: 0.5rem 0;
-        border-left: 4px solid #5a67d8;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .event-card h4 {
-        color: white !important;
-        margin-bottom: 1rem;
-    }
-    .event-card p strong {
-        color: #ffd700;
+    for thai_word, days in thai_relative_dates.items():
+        if thai_word in date_str:
+            target_date = reference_date + timedelta(days=days)
+            return target_date.strftime('%Y-%m-%d')
+    
+    # Thai months
+    thai_months = {
+        'มกราคม': 1, 'ม.ค.': 1, 'กุมภาพันธ์': 2, 'ก.พ.': 2,
+        'มีนาคม': 3, 'มี.ค.': 3, 'เมษายน': 4, 'เม.ย.': 4,
+        'พฤษภาคม': 5, 'พ.ค.': 5, 'มิถุนายน': 6, 'มิ.ย.': 6,
+        'กรกฎาคม': 7, 'ก.ค.': 7, 'สิงหาคม': 8, 'ส.ค.': 8,
+        'กันยายน': 9, 'ก.ย.': 9, 'ตุลาคม': 10, 'ต.ค.': 10,
+        'พฤศจิกายน': 11, 'พ.ย.': 11, 'ธันวาคม': 12, 'ธ.ค.': 12,
     }
     
-    /* Modern Calendar Styling */
-    .calendar-container {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 1rem;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-    }
-    .calendar-day {
-        border: 1px solid #e2e8f0;
-        padding: 0.75rem;
-        min-height: 120px;
-        background: white;
-        border-radius: 0.5rem;
-        margin: 2px;
-        transition: all 0.2s;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .calendar-day:hover {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        transform: translateY(-2px);
-    }
-    .calendar-day-header {
-        font-weight: 700;
-        text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 0.75rem;
-        font-size: 1.1rem;
-        border-radius: 0.5rem;
-        margin: 2px;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    .day-number {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #2d3748;
-        margin-bottom: 0.5rem;
-    }
-    .today-badge {
-        background: #fbbf24;
-        color: #78350f;
-        padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 0.7rem;
-        font-weight: 700;
-        margin-left: 4px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Sidebar
-with st.sidebar:
-    st.title("📅 Thai Calendar Bot")
-    st.markdown("---")
+    # Extract all numbers
+    numbers = re.findall(r'\d+', date_str)
     
-    # Calendar navigation
-    st.subheader("Calendar Navigation")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("◀"):
-            st.session_state.current_month -= 1
-            if st.session_state.current_month < 1:
-                st.session_state.current_month = 12
-                st.session_state.current_year -= 1
-            st.rerun()
-    
-    with col2:
-        month_year = f"{cal.month_name[st.session_state.current_month]} {st.session_state.current_year}"
-        st.markdown(f"**{month_year}**")
-    
-    with col3:
-        if st.button("▶"):
-            st.session_state.current_month += 1
-            if st.session_state.current_month > 12:
-                st.session_state.current_month = 1
-                st.session_state.current_year += 1
-            st.rerun()
-    
-    # Today button
-    if st.button("📍 Today"):
-        now = get_current_datetime()
-        st.session_state.current_month = now.month
-        st.session_state.current_year = now.year
-        st.rerun()
-    
-    st.markdown("---")
-    
-    # All events list - Each event collapsible
-    st.subheader("📋 All Events")
-    events = load_events(SESSION_EVENTS_FILE)
-    
-    if events:
-        total_text = f"Total: {len(events)} events"
-        st.markdown(f"**{total_text}**")
-        st.markdown("---")
-        
-        
-        for idx, event in enumerate(sorted(events, key=lambda x: x.get('date') or '9999-99-99')):
-            desc = event.get('description') or 'No description'
-            event_date = event.get('date', 'No date')
-            event_time = event.get('time', '')
+    # Try to parse with month (higher priority than weekday alone)
+    for thai_month, month_num in thai_months.items():
+        if thai_month in date_str:
+            day = int(numbers[0]) if numbers else 1
+            year = reference_date.year
             
-            # Each event in its own expander
-            with st.expander(f"📅 {event_date} - {desc[:25]}...", expanded=False):
-                # Show details inside the expander
-                st.markdown(f"**Time:** {event_time}")
-                st.markdown(f"**Event:** {desc}")
-                if event.get('attendees') and event.get('attendees') != '-':
-                    st.markdown(f"**Attendees:** {event.get('attendees')}")
-                if event.get('location') and event.get('location') != '-':
-                    st.markdown(f"**Location:** {event.get('location')}")
-                
-            st.markdown("---")
+            # Check if year is also specified (2-digit or 4-digit)
+            if len(numbers) >= 2:
+                year_candidate = int(numbers[1])
+                # Handle 2-digit year: always treat as B.E. (พ.ศ.) short form.
+                # e.g. "69" → B.E. 2569 → C.E. 2026  (NOT 1969 or 2069)
+                # Anchor to the current B.E. century so "69" stays near today.
+                if year_candidate < 100:
+                    current_be_year = reference_date.year + 543
+                    current_be_century = (current_be_year // 100) * 100  # e.g. 2500
+                    be_year = current_be_century + year_candidate        # e.g. 2569
+                    year = be_year - 543                                 # → C.E. 2026
+                elif year_candidate > 2500:  # Full Buddhist year (e.g. 2569)
+                    year = year_candidate - 543
+                else:                        # Already a C.E. year (e.g. 2026)
+                    year = year_candidate
             
-            # Buttons to view full details or delete
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔍 View", key=f"view_{idx}_{event['id']}", use_container_width=True):
-                    st.session_state.selected_event = event
-                    st.session_state.editing_in_modal = None  # Reset edit mode
-                    st.rerun()
-            with col2:
-                if st.button("🗑️ Delete", key=f"del_{idx}_{event['id']}", use_container_width=True, type="secondary"):
-                    delete_event(event['id'], SESSION_EVENTS_FILE)
-                    st.success("Event deleted!")
-                    st.rerun()
-    else:
-        st.info("No events yet. Start chatting to add events!")
+            try:
+                target_date = datetime(year, month_num, day, tzinfo=TZ)
+                if target_date < reference_date:
+                    target_date = datetime(year + 1, month_num, day, tzinfo=TZ)
+                return target_date.strftime('%Y-%m-%d')
+            except ValueError:
+                pass
     
-    st.markdown("---")
+    # Thai weekdays (fallback if no month specified)
+    thai_weekdays = {
+        'จันทร์': 0, 'อังคาร': 1, 'พุธ': 2, 'พฤหัสบดี': 3,
+        'พฤหัส': 3, 'ศุกร์': 4, 'เสาร์': 5, 'อาทิตย์': 6,
+    }
     
-    # Export options
-    st.subheader("Export")
-    if st.button("📥 Export as JSON"):
-        st.download_button(
-            label="Download events.json",
-            data=open(SESSION_EVENTS_FILE, 'r', encoding='utf-8').read(),
-            file_name='events.json',
-            mime='application/json'
+    for thai_day, weekday in thai_weekdays.items():
+        if thai_day in date_str:
+            current_weekday = reference_date.weekday()
+            days_ahead = weekday - current_weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            target_date = reference_date + timedelta(days=days_ahead)
+            return target_date.strftime('%Y-%m-%d')
+    
+    # Fallback to dateparser
+    try:
+        parsed = dateparser.parse(
+            date_str,
+            languages=['th', 'en'],
+            settings={'TIMEZONE': 'Asia/Bangkok', 'RELATIVE_BASE': reference_date.replace(tzinfo=None)}
         )
+        if parsed:
+            return parsed.strftime('%Y-%m-%d')
+    except:
+        pass
     
-    # Clear data
-    if st.button("🗑️ Clear All Data"):
-        if st.checkbox("Confirm delete all"):
-            save_events([], SESSION_EVENTS_FILE)
-            st.session_state.messages = []
-            st.success("All data cleared!")
-            st.rerun()
+    return None
 
-# Main content
-st.title("💬 Thai NLP Calendar Chatbot")
-st.caption("Chat in Thai to create calendar events automatically!")
 
-# Tab layout
-tab1, tab2 = st.tabs(["💬 Chat", "📅 Calendar"])
+def parse_thai_time(time_str: str) -> Optional[str]:
+    """
+    Parse Thai time expressions to HH:MM format
+    Enhanced to handle time ranges - extracts the START time
+    Supports both : and . as separators (10:00 or 10.00)
+    Examples: "10:00–12:00" -> "10:00", "10.00-12.00" -> "10:00"
+    """
+    if not time_str:
+        return None
+    
+    time_str = time_str.strip().lower()
+    
+    # Handle time ranges - extract first time only  
+    # Common separators: – (en-dash), - (hyphen), ~, ถึง
+    for separator in ['–', '-', '~', 'ถึง', 'to']:
+        if separator in time_str:
+            parts = time_str.split(separator)
+            if parts:
+                time_str = parts[0].strip()  # Take only the start time
+            break
+    
+    # Find time patterns - support both : and . as separators
+    # Pattern 1: HH:MM or HH.MM
+    time_pattern = re.findall(r'(\d{1,2})[:.](\d{2})', time_str)
+    if time_pattern:
+        hour, minute = int(time_pattern[0][0]), int(time_pattern[0][1])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    
+    # Extract numbers for non-formatted times
+    numbers = re.findall(r'\d+', time_str)
+    
+    hour = 0
+    minute = 0
+    
+    if numbers:
+        hour = int(numbers[0])
+        if len(numbers) > 1:
+            minute = int(numbers[1])
+    
+    # Thai time period adjustments
+    if any(word in time_str for word in ['บ่าย', 'เย็น', 'ค่ำ']):
+        if hour < 12:
+            hour += 12
+    
+    if 'ครึ่ง' in time_str:
+        minute = 30
+    
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return f"{hour:02d}:{minute:02d}"
+    
+    return None
 
-with tab1:
-    # Chat interface
-    st.subheader("Chat")
-    
-    # Display chat messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if "event" in message:
-                event = message["event"]
-                
-                # Always show all fields
-                st.markdown(f"""
-                <div class="event-card">
-                    <h4>📅 Event Created</h4>
-                    <p><strong>Date:</strong> {event.get('date', 'N/A')}</p>
-                    <p><strong>Time:</strong> {event.get('time', 'N/A')}</p>
-                    <p><strong>Event:</strong> {event.get('description', 'N/A')}</p>
-                    <p><strong>Attendees:</strong> {event.get('attendees', '-')}</p>
-                    <p><strong>Where:</strong> {event.get('location', '-')}</p>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # Chat input
-    if prompt := st.chat_input("พิมพ์ข้อความภาษาไทย... (เช่น พรุ่งนี้มีประชุมกับบีมตอน 10 โมง)"):
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Process with NLP (DO NOT SAVE YET)
-        with st.chat_message("assistant"):
-            with st.spinner("Processing..."):
-                try:
-                    # Extract MULTIPLE events using new separator logic
-                    events = extract_multiple_events(
-                        prompt,
-                        nlp_model=st.session_state.nlp_model
-                    )
-                    
-                    # Process each event - validate and create
-                    from validation import validate_event_data, apply_safe_defaults
-                    valid_events = []
-                    for slots in events:
-                        # Validate and get safe defaults
-                        is_valid, missing_fields, safe_defaults = validate_event_data(slots)
-                        
-                        # Apply safe defaults
-                        slots_with_defaults = apply_safe_defaults(slots, safe_defaults)
-                        
-                        # Create event (without saving)
-                        event = create_event(slots_with_defaults)
-                        
-                        # Add validation metadata
-                        event['is_valid'] = is_valid
-                        event['missing_fields'] = missing_fields
-                        event['auto_filled'] = safe_defaults
-                        
-                        valid_events.append(event)
-                    
-                    # Check if we have multiple events
-                    if len(valid_events) > 1:
-                        st.success(f"✨ พบ {len(valid_events)} กิจกรรม!")
-                    
-                    # Display each event
-                    for idx, event in enumerate(valid_events, 1):
-                        # Check validation status
-                        if not event.get('is_valid'):
-                            # CRITICAL DATA MISSING - Ask user
-                            from validation import format_missing_fields_message
-                            missing_msg = format_missing_fields_message(event.get('missing_fields', []))
-                            
-                            st.warning(f"⚠️ กิจกรรมที่ {idx}: ข้อมูลไม่ครบ")
-                            st.markdown(missing_msg)
-                            
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": f"ข้อมูลไม่ครบ: {missing_msg}"
-                            })
-                        
-                        else:
-                            # DATA IS VALID - Show confirmation UI
-                            if len(valid_events) > 1:
-                                response = f"✅ กิจกรรมที่ {idx}:"
-                            else:
-                                response = "✅ ฉันพบข้อมูลนี้จากข้อความของคุณ:"
-                            st.markdown(response)
-                        
-                            # Show auto-filled info if any
-                            if event.get('auto_filled'):
-                                auto_fill_msg = ", ".join([f"{k}: {v}" for k, v in event['auto_filled'].items()])
-                                st.info(f"ℹ️ ตั้งค่าอัตโนมัติ: {auto_fill_msg}")
-                            
-                            # Display extracted event data
-                            
-                            # Build conditional fields
-                            attendees_html = f"<p><strong>ผู้เข้าร่วม:</strong> {event['attendees']}</p>" if event.get('attendees') and event['attendees'] != '-' else ""
-                            location_html = f"<p><strong>สถานที่:</strong> {event['location']}</p>" if event.get('location') and event['location'] != '-' else ""
-                            
-                            st.markdown(f"""
-                            <div class="event-card">
-                                <h4>📅 ข้อมูลที่ตรวจพบ</h4>
-                                <p><strong>วันที่:</strong> {event.get('date', 'N/A')}</p>
-                                <p><strong>เวลา:</strong> {event.get('time', 'N/A')}</p>
-                                <p><strong>กิจกรรม:</strong> {event.get('description', 'N/A')}</p>
-                                {attendees_html}
-                                {location_html}
-                            </div>
-                            """, unsafe_allow_html=True)
-                            
-                            #Store pending event(s) in session state
-                            # Reset pending_events for new input (prevents duplicates)
-                            st.session_state.pending_events = []
-                            st.session_state.pending_events.append(event)
-                            
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": response,
-                                "event": event,
-                                "needs_confirmation": True
-                            })
-                    
-                except Exception as e:
-                    error_msg = f"เกิดข้อผิดพลาด: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_msg
-                    })
-        
-        st.rerun()
-    
-    # Show confirmation buttons if there are pending events
-    pending_events = st.session_state.get('pending_events', [])
-    if pending_events:
-        st.markdown("---")
-        if len(pending_events) > 1:
-            st.subheader(f"🔍 ยืนยันการบันทึก ({len(pending_events)} กิจกรรม)")
-        else:
-            st.subheader("🔍 ยืนยันการบันทึก")
-        
-        col1, col2, col3 = st.columns([1, 1, 2])
-        
-        with col1:
-            if st.button("✅ บันทึกทั้งหมด", key="confirm_save_all_btn", use_container_width=True, type="primary"):
-                try:
-                    from validation import is_event_saveable
-                    from nlp_utils import add_event
-                    
-                    saved_count = 0
-                    failed_events = []
-                    
-                    # Save all valid events
-                    for idx, pending in enumerate(pending_events, 1):
-                        # CRITICAL: Clean FIRST, then validate (matches edit flow)
-                        clean_event = {k: v for k, v in pending.items() 
-                                     if k not in ['is_valid', 'missing_fields', 'auto_filled']}
-                        
-                        # Replace placeholder "-" with None for validation
-                        for key in ['date', 'time', 'description', 'attendees', 'location']:
-                            if clean_event.get(key) == '-':
-                                clean_event[key] = None
-                        
-                        # Now validate the clean data
-                        if is_event_saveable(clean_event):
-                            add_event(clean_event, SESSION_EVENTS_FILE)
-                            saved_count += 1
-                        else:
-                            # Track which fields are missing
-                            missing = []
-                            if not clean_event.get('date'):
-                                missing.append('วันที่')
-                            if not clean_event.get('time'):
-                                missing.append('เวลา')
-                            if not clean_event.get('description'):
-                                missing.append('กิจกรรม')
-                            failed_events.append((idx, missing))
-                    
-                    # Show detailed results
-                    if saved_count == len(pending_events):
-                        st.success(f"✅ บันทึกสำเร็จ {saved_count} กิจกรรม!")
-                        # Clear all pending states and rerun
-                        st.session_state.pending_events = []
-                        st.session_state.pending_event = None
-                        st.session_state.show_edit_form = False
-                        st.rerun()
-                    elif saved_count > 0:
-                        st.warning(f"⚠️ บันทึกสำเร็จ {saved_count}/{len(pending_events)} กิจกรรม")
-                        for event_num, missing_fields in failed_events:
-                            st.error(f"❌ กิจกรรมที่ {event_num}: ขาด {', '.join(missing_fields)}")
-                        # Partial save - clear only saved events, keep failed ones
-                        st.session_state.pending_events = []
-                        st.session_state.pending_event = None
-                        st.session_state.show_edit_form = False
-                        st.rerun()
-                    else:
-                        # No saves - show errors and DON'T rerun (let user see the errors)
-                        st.error("❌ ไม่สามารถบันทึกได้ - ข้อมูลไม่ครบ")
-                        for event_num, missing_fields in failed_events:
-                            st.error(f"📌 กิจกรรมที่ {event_num}: ขาด {', '.join(missing_fields)}")
-                    
-                except Exception as e:
-                    st.error(f"❌ เกิดข้อผิดพลาดในการบันทึก: {str(e)}")
-        
-        
-        
-        with col2:
-            if st.button("✏️ แก้ไข", key="confirm_edit_btn", use_container_width=True):
-                st.session_state.show_edit_form = True
-                st.session_state.pending_event = pending_events[0]  # Edit first event
-        
-        with col3:
-            if st.button("❌ ยกเลิก", key="confirm_cancel_btn", use_container_width=True):
-                st.session_state.pending_events = []
-                st.session_state.pending_event = None
-                st.rerun()
-        
-        # Show edit form if requested
-        if st.session_state.get('show_edit_form'):
-            st.markdown("### ✏️ แก้ไขข้อมูล")
-            
-            with st.form("edit_event_form"):
-                from datetime import datetime
-                
-                # Get the pending event from session state
-                pending = st.session_state.get('pending_event', {})
-                
-                # Parse date for date_input
-                try:
-                    date_val = datetime.strptime(pending.get('date', ''), '%Y-%m-%d').date() if pending.get('date') else None
-                except:
-                    date_val = None
-                
-                # Parse time for time_input
-                try:
-                    time_val = datetime.strptime(pending.get('time', '09:00'), '%H:%M').time() if pending.get('time') else None
-                except:
-                    time_val = None
-                
-                new_date = st.date_input("📅 วันที่", value=date_val)
-                new_time = st.time_input("🕐 เวลา", value=time_val)
-                new_desc = st.text_input("📝 กิจกรรม", value=pending.get('description', ''))
-                new_attendees = st.text_input("👥 ผู้เข้าร่วม", value=pending.get('attendees', ''))
-                new_location = st.text_input("📍 สถานที่", value=pending.get('location', ''))
-                
-                if st.form_submit_button("💾 บันทึกการแก้ไข", use_container_width=True, type="primary"):
-                    from validation import is_event_saveable
-                    
-                    # Update pending event with new values
-                    updated_event = {
-                        'id': pending['id'],
-                        'date': new_date.strftime('%Y-%m-%d') if new_date else None,
-                        'time': new_time.strftime('%H:%M') if new_time else None,
-                        'description': new_desc,
-                        'attendees': new_attendees if new_attendees else None,
-                        'location': new_location if new_location else None,
-                        'raw_text': pending.get('raw_text', ''),
-                        'created_at': pending.get('created_at', '')
-                    }
-                    
-                    # Final validation
-                    if is_event_saveable(updated_event):
-                        add_event(updated_event, SESSION_EVENTS_FILE)  # Save to session file!
-                        st.success("✅ บันทึกการแก้ไขสำเร็จ!")
-                        # Clear all pending states
-                        st.session_state.pending_events = []
-                        st.session_state.pending_event = None
-                        st.session_state.show_edit_form = False
-                        st.rerun()
-                    else:
-                        st.error("❌ กรุณาระบุทั้งวันที่และกิจกรรม")
 
-with tab2:
-    # Calendar view
-    st.subheader(f"📅 {cal.month_name[st.session_state.current_month]} {st.session_state.current_year}")
+def extract_entities_with_pos(text: str, nlp_model=None) -> List[Tuple[str, str, str]]:
+    """Extract entities with POS tags for validation"""
+    if nlp_model is None:
+        nlp_model = load_ner_model()
     
-    # Load events for display
-    events = load_events(SESSION_EVENTS_FILE)
-    events_by_date = {}
-    for event in events:
-        if event.get('date'):
-            if event['date'] not in events_by_date:
-                events_by_date[event['date']] = []
-            events_by_date[event['date']].append(event)
+    text = normalize_thai_text(text)
+    doc = nlp_model(text)
     
-    # Create calendar
-    month_cal = cal.monthcalendar(st.session_state.current_year, st.session_state.current_month)
+    results = []
+    for ent in doc.ents:
+        pos_tags = [token.pos_ for token in ent]
+        main_pos = pos_tags[0] if pos_tags else "UNKNOWN"
+        results.append((ent.text, ent.label_, main_pos))
     
-    # Day headers
-    cols = st.columns(7)
-    day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-    for i, day_name in enumerate(day_names):
-        with cols[i]:
-            st.markdown(f'<div class="calendar-day-header">{day_name}</div>', unsafe_allow_html=True)
+    return results
+
+
+def split_by_separators(text: str) -> List[str]:
+    """
+    Split text into multiple event segments using common separators.
     
-    # Calendar days
-    for week in month_cal:
-        cols = st.columns(7)
-        for i, day in enumerate(week):
-            with cols[i]:
-                if day == 0:
-                    # Empty day cell
-                    st.markdown('<div class="calendar-day" style="background-color: #f7fafc; min-height: 120px;"></div>', unsafe_allow_html=True)
+    Separators include:
+    - และ, แล้ว, กับ (Thai 'and', 'then', 'with')
+    - and, then (English)
+    - Commas, semicolons, slashes
+    
+    Returns list of text segments
+    """
+    if not text:
+        return []
+    
+    # Define separator patterns (order matters!)
+    separators = [
+        r'\s+และ\s+',      # Thai 'and'
+        r'\s+แล้ว\s+',     # Thai 'then'  
+        r'\s+แล้วก็\s+',   # Thai 'and then'
+        r'\s+พร้อม\s+',    # Thai 'along with'
+        r'\s+,\s*และ\s+',  # ', and'
+        r'\s+;\s*',        # semicolon
+        r'\s+/\s+',        # slash separator
+        r'\s*,\s+(?=.{10,})', # comma (but only if followed by substantial text)
+        r'\s+and\s+',      # English 'and'
+        r'\s+then\s+',     # English 'then'
+    ]
+    
+    # Combine all separators into one pattern
+    combined_pattern = '|'.join(f'({sep})' for sep in separators)
+    
+    # Split text
+    segments = re.split(combined_pattern, text, flags=re.IGNORECASE)
+    
+    # Filter out the separator matches themselves and empty strings
+    segments = [seg.strip() for i, seg in enumerate(segments) 
+                if i % 2 == 0 and seg and seg.strip()]
+    
+    return segments if segments else [text]
+
+
+def extract_multiple_events(text: str, nlp_model=None) -> List[Dict[str, any]]:
+    """
+    Split text by separators and extract multiple events.
+    
+    Example:
+        Input: "ประชุมวันจันทร์ 10 โมง และส่งเอกสารพรุ่งนี้"
+        Output: [
+            {date: '2026-02-10', time: '10:00', description: 'ประชุม', ...},
+            {date: '2026-02-11', time: None, description: 'ส่งเอกสาร', ...}
+        ]
+    """
+    # Split into segments
+    segments = split_by_separators(text)
+    
+    # Process each segment
+    events = []
+    for segment in segments:
+        slots = extract_slots(segment, nlp_model)
+        
+        # Only add if it has at least a description or date
+        if slots.get('description') or slots.get('date'):
+            # Add original segment as raw_text
+            slots['raw_text'] = segment
+            events.append(slots)
+    
+    # If no events extracted, return single event from full text
+    if not events:
+        return [extract_slots(text, nlp_model)]
+    
+    return events
+
+
+def extract_slots(text: str, nlp_model=None) -> Dict[str, any]:
+    """
+    Extract calendar event slots using HYBRID approach:
+    1. Rule-based extraction for DATE and TIME (always works)
+    2. NER for ACTIVITY, PERSON, LOCATION (if model is trained)
+    
+    This ensures basic functionality even without a trained model!
+    """
+    # Normalize text first
+    normalized_text = normalize_thai_text(text)
+    
+    slots = {
+        'date': None,
+        'time': None,
+        'description': None,
+        'attendees': [],
+        'location': None,
+        'raw_text': text
+    }
+    
+    # STEP 1: Rule-based DATE extraction (works without model!)
+    # Try to parse date from the original text
+    date_parsed = parse_thai_date(normalized_text)
+    if date_parsed:
+        slots['date'] = date_parsed
+    
+    # STEP 2: Rule-based TIME extraction (works without model!)
+    # Look for time patterns in text
+    time_parsed = parse_thai_time(normalized_text)
+    if time_parsed:
+        slots['time'] = time_parsed
+    
+    # STEP 3: Try NER for ACTIVITY, PERSON, LOCATION (if model available)
+    try:
+        entities = extract_entities_with_pos(normalized_text, nlp_model)
+        
+        for ent_text, label, pos in entities:
+            # Only use NER for activity, person, location
+            # (Date/time already handled by rules)
+            if label in ['ACTIVITY', 'EVENT'] and pos in ['VERB', 'NOUN', 'PROPN', 'UNKNOWN']:
+                if not slots['description']:
+                    slots['description'] = ent_text
                 else:
-                    date_str = f"{st.session_state.current_year}-{st.session_state.current_month:02d}-{day:02d}"
-                    
-                    # Check if this is today
-                    now = get_current_datetime()
-                    is_today = (date_str == now.strftime('%Y-%m-%d'))
-                    
-                    # Get events for this day
-                    day_events = events_by_date.get(date_str, [])
-                    
-                    # Build day cell HTML with modern styling
-                    today_badge = '<span class="today-badge">TODAY</span>' if is_today else ''
-                    bg_color = "#fef3c7" if is_today else "white"
-                    
-                    # Start container
-                    st.markdown(
-                        f'<div class="calendar-day" style="background-color: {bg_color};">'
-                        f'<div class="day-number">{day}{today_badge}</div>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    # Limit events shown to prevent overlap (max 2)
-                    MAX_EVENTS_SHOWN = 2
-                    visible_events = day_events[:MAX_EVENTS_SHOWN]
-                    hidden_count = len(day_events) - MAX_EVENTS_SHOWN
-                    
-                    # Create clickable buttons for visible events
-                    for event_idx, event in enumerate(visible_events):
-                        time_str = event.get('time', '')
-                        desc = (event.get('description') or 'Event')[:15]
-                        button_label = f"🔔 {time_str} {desc}"
-                        
-                        if st.button(button_label, key=f"cal_event_{event_idx}_{event['id']}_{date_str}", use_container_width=True, type="secondary"):
-                            st.session_state.selected_event = event
-                            st.rerun()
-                    
-                    # Show "+ X more" button if there are hidden events
-                    if hidden_count > 0:
-                        if st.button(f"+ {hidden_count} more", key=f"more_{date_str}", use_container_width=True, type="secondary"):
-                            # Set first hidden event to show them all somehow
-                            # For now, just show the first hidden one
-                            st.session_state.selected_event = day_events[MAX_EVENTS_SHOWN]
-                            st.rerun()
-                    
-                    # Close div
-                    st.markdown('</div>', unsafe_allow_html=True)
-
-# Event Detail Modal - Using st.dialog for floating popup
-@st.dialog("📋 Event Details", width="large")
-def show_event_details():
-    event = st.session_state.selected_event
+                    slots['description'] += f", {ent_text}"
+            
+            elif label == 'PERSON' and pos in ['PROPN', 'NOUN', 'UNKNOWN']:
+                slots['attendees'].append(ent_text)
+            
+            elif label == 'LOCATION' and pos in ['PROPN', 'NOUN', 'UNKNOWN']:
+                slots['location'] = ent_text
+    except Exception as e:
+        # NER failed (model not trained?) - that's OK, we have dates/times from rules
+        print(f"NER extraction failed (this is OK if model isn't trained): {e}")
     
-    # Check if we're in edit mode for this event
-    if st.session_state.get('editing_in_modal') == event['id']:
-        # EDIT MODE
-        st.markdown("### ✏️ แก้ไขข้อมูล")
+    # STEP 4: Fallback - pattern-based extraction for person and location
+    if not slots['description']:
+        # List of common activity keywords
+        activity_keywords = [
+            # Meetings & work
+            'ประชุม', 'meeting', 'นัด', 'เจอ', 'พบ',
+            'เรียน', 'สอบ', 'นำเสนอ', 'presentation',
+            'สัมมนา', 'workshop', 'ส่งงาน', 'รายงาน',
+            
+            # Food & dining
+            'กินข้าว', 'กินอาหาร', 'ทานข้าว', 'ทานอาหาร',
+            'อาหาร', 'มื้อ', 'เลี้ยง', 'ดินเนอร์',
+            
+            # Social activities
+            'เที่ยว', 'ไปเที่ยว', 'ไปเดิน', 'ช้อปปิ้ง', 'ดูหนัง',
+            'ดูคอนเสิร์ต', 'งานปาร์ตี้', 'ปาร์ตี้',
+            
+            # Health & wellness
+            'หมอ', 'คลินิก', 'รักษา', 'ตรวจ', 'โรงพยาบาล',
+            
+            # Sports & fitness
+            'ออกกำลังกาย', 'ฟิตเนส', 'วิ่ง', 'ว่ายน้ำ', 'โยคะ',
+        ]
         
-        with st.form(key=f"modal_edit_{event['id']}"):
-            from datetime import datetime
+        for keyword in activity_keywords:
+            if keyword in normalized_text:
+                slots['description'] = keyword
+                break
+    
+    # STEP 5: Pattern-based PERSON detection
+    if not slots['attendees']:
+        found_names = []
+        
+        # Expanded Thai titles and roles
+        titles = [
+            'รศ\\.ดร\\.', 'รศ\\.', 'ผศ\\.ดร\\.', 'ผศ\\.', 'ดร\\.', 'พญ\\.', 'นพ\\.',
+            'อาจารย์', 'คุณ', 'นาย', 'นางสาว', 'นาง', 'น\\.ส\\.', 
+            'ท่าน', 'พี่', 'เพื่อน'
+        ]
+        
+        roles = [
+            'ผอ\\.', 'ผู้อำนวยการ', 'ประธาน', 'เลขานุการ', 'นศ\\.', 'นักศึกษา'
+        ]
+        
+        person_patterns = [
+            # Full names: FirstName LastName (both must be Thai, 2+ chars each)
+            r'([ก-ฮ]{2,15})\s+([ก-ฮ]{2,20})(?=\s|$|ที่|ตอน|เวลา)',
             
-            # Parse existing values
-            try:
-                date_val = datetime.strptime(event.get('date', ''), '%Y-%m-%d').date() if event.get('date') else None
-            except:
-                date_val = None
+            # Title + Full Name (e.g., "รศ.ดร. ศิรวิชญ์")
+            rf'(?:{"|".join(titles)})\s+([ก-ฮ][ก-ฮะ-ูเ-ไ์่้๊๋ํ]{{2,25}})(?:\s+([ก-ฮ]{{2,20}}))?(?=\s|$|ที่|ตอน)',
             
-            try:
-                time_val = datetime.strptime(event.get('time', '09:00'), '%H:%M').time() if event.get('time') else None
-            except:
-                time_val = None
+            # Role + name (e.g., "ผอ. สมชัย")
+            rf'(?:{"|".join(roles)})\s+([ก-ฮ][ก-ฮะ-ูเ-ไ์่้๊๋ํ]{{2,20}})(?=\s|$|ที่)',
             
-            new_date = st.date_input("📅 วันที่", value=date_val)
-            new_time = st.time_input("🕐 เวลา", value=time_val)
-            new_desc = st.text_input("📝 กิจกรรม", value=event.get('description', ''))
-            new_attendees = st.text_input("👥 ผู้เข้าร่วม", value=event.get('attendees', ''))
-            new_location = st.text_input("📍 สถานที่", value=event.get('location', ''))
+            # "กับ" + name/nickname
+            r'กับ\s+([ก-ฮ][ก-ฮะ-ูเ-ไ์่้๊๋ํ]{1,20})(?=\s|$|ที่|และ)',
             
-            col_save, col_cancel = st.columns(2)
-            with col_save:
-                if st.form_submit_button("💾 บันทึก", use_container_width=True, type="primary"):
-                    updated_data = {
-                        'date': new_date.strftime('%Y-%m-%d') if new_date else None,
-                        'time': new_time.strftime('%H:%M') if new_time else None,
-                        'description': new_desc,
-                        'attendees': new_attendees if new_attendees else '-',
-                        'location': new_location if new_location else '-'
-                    }
-                    update_event(event['id'], updated_data, SESSION_EVENTS_FILE)
-                    st.session_state.editing_in_modal = None
-                    st.session_state.selected_event = None
-                    st.success("✅ บันทึกเรียบร้อย!")
-                    st.rerun()
-            with col_cancel:
-                if st.form_submit_button("❌ ยกเลิก", use_container_width=True):
-                    st.session_state.editing_in_modal = None
-                    st.rerun()
+            # Verbs + person (พบ, เจอ, นัด, etc.)
+            r'(?:พบ|เจอ|นัด|หา|ติดต่อ)\s+([ก-ฮ][ก-ฮะ-ูเ-ไ์่้๊๋ํ]{1,20})(?=\s|$|ที่)',
+            
+            # Group/department descriptors (e.g., "อาจารย์สาขาวิชาวิทยาการคอมฯ")
+            r'(อาจารย์(?:สาขา)?(?:วิชา)?[ก-ฮะ-ูเ-ไ์่้๊๋ํฯ\s]{3,40})(?=\s|$|ที่|ตอน|เวลา|วัน)',
+            r'(นักศึกษา[ก-ฮะ-ูเ-ไ์่้๊๋ํ\s]{0,20})(?=\s|$|ที่)',
+        ]
+        
+        for pattern in person_patterns:
+            matches = re.findall(pattern, normalized_text)
+            for match in matches:
+                if isinstance(match, tuple):
+                    # Handle captured groups (e.g., first name + last name)
+                    name_parts = [m.strip() for m in match if m and m.strip()]
+                    if name_parts:
+                        found_names.extend(name_parts)
+                else:
+                    found_names.append(match.strip())
+        
+        # Exclusion filters
+        excluded = {
+            'วัน', 'เวลา', 'ที่', 'ตอน', 'เดือน', 'ปี', 'ประชุม',
+            'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+            'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.',
+        }
+        
+        if found_names:
+            # Filter and validate names
+            names = [
+                m.strip() for m in found_names
+                if m.strip() not in excluded
+                and len(m.strip()) >= 2  # Min 2 chars
+                and len(m.strip()) <= 40  # Max 40 chars (for group names)
+                and not m.strip()[0] in ['์', 'ิ', 'ี', 'ึ', 'ื', 'ุ', 'ู', '่', '้', '๊', '๋']
+                and '.' not in m  # Exclude abbreviations with dots
+            ]
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_names = []
+            for name in names:
+                if name not in seen and name:  # Also check not empty
+                    seen.add(name)
+                    unique_names.append(name)
+            
+            if unique_names:
+                slots['attendees'] = ', '.join(unique_names[:2])  # Max 2 names
+    
+    # STEP 5.5: Pattern-based GENERIC PERSON detection (if no specific names found)
+    if not slots['attendees']:
+        generic_people = []
+        
+        # Pattern 1: "กับ" + generic person term
+        generic_person_pattern = r'กับ\s*(เพื่อน|แฟน|พี่|น้อง|พ่อ|แม่|ลูก|สามี|ภรรยา|เจ้านาย|หัวหน้า|ทีม|เพื่อนร่วมงาน|คนรัก|แฟนสาว|แฟนหนุ่ม)'
+        matches = re.findall(generic_person_pattern, normalized_text)
+        generic_people.extend(matches)
+        
+        # Pattern 2: generic person + action verbs (พบ, เจอ, etc.)
+        person_action_pattern = r'(เพื่อน|แฟน|พี่|น้อง)\s*(?:ไป|มา|พบ|เจอ|นัด)'
+        matches = re.findall(person_action_pattern, normalized_text)
+        generic_people.extend(matches)
+        
+        if generic_people:
+            # Remove duplicates while preserving order
+            unique_people = list(dict.fromkeys(generic_people))
+            slots['attendees'] = ', '.join(unique_people[:2])  # Max 2
+    
+    # STEP 6: Pattern-based LOCATION detection  
+    if not slots['location']:
+        # Common location keywords - match more conservatively
+        location_keywords = [
+            'ตึก', 'อาคาร', 'ห้อง', 'ชั้น', 'ลาน',
+            'โรงพยาบาล', 'โรงเรียน', 'มหาวิทยาลัย',
+            'ศูนย์', 'คณะ', 'สำนักงาน'
+        ]
+        
+        for keyword in location_keywords:
+            pattern = keyword + r'\s*([ก-ฮา-ูเ-ไ0-9\s]{0,20})(?:\s|ที่|ตอน|เวลา|$)'
+            match = re.search(pattern, normalized_text)
+            if match:
+                # Preserve spacing between keyword and content
+                content = match.group(1).strip()
+                if content:
+                    # Add space between keyword and number if missing
+                    if content and content[0].isdigit():
+                        location = keyword + ' ' + content
+                    else:
+                        location = keyword + content
+                else:
+                    location = keyword
+                
+                # Validate: should be 3-30 chars and not just the keyword
+                if 3 <= len(location) <= 30 and location != keyword:
+                    slots['location'] = location[:30]
+                    break
+        
+        # Specific location patterns
+        if not slots['location']:
+            location_patterns = [
+                (r'ที่\s*([ก-ฮ][ก-ฮา-ูเ-ไ\s]{2,25})(?:ตอน|เวลา|ชั้น|$)', 1),  # "ที่" + location
+                (r'(zoom|google\s*meet|teams|online)', 0),  # Online platforms
+            ]
+            
+            for pattern, group_idx in location_patterns:
+                match = re.search(pattern, normalized_text, re.IGNORECASE)
+                if match:
+                    location_text = match.group(group_idx) if group_idx > 0 else match.group()
+                    if any(word in location_text.lower() for word in ['zoom', 'meet', 'teams', 'online']):
+                        slots['location'] = 'ออนไลน์'
+                    else:
+                        slots['location'] = location_text.strip()[:30]
+                    break
+    
+    # Convert attendees list to string (only if it's a list)
+    if slots['attendees']:
+        if isinstance(slots['attendees'], list):
+            slots['attendees'] = ', '.join(slots['attendees'])
+        # If it's already a string (from generic person detection), leave it as is
     else:
-        # VIEW MODE
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 2.5rem; border-radius: 1rem; color: white; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
-            <h1 style="color: white; margin: 0; font-size: 2.5rem;">📅 {event.get('description', 'Event')}</h1>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("")
-        
-        # Details in columns
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("### 📆 Date")
-            st.markdown(f"<p style='font-size: 1.5rem; font-weight: 600;'>{event.get('date', 'N/A')}</p>", unsafe_allow_html=True)
-            
-            st.markdown("### 👥 Attendees")
-            st.markdown(f"<p style='font-size: 1.3rem;'>{event.get('attendees', '-')}</p>", unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("### 🕐 Time")
-            st.markdown(f"<p style='font-size: 1.5rem; font-weight: 600;'>{event.get('time', 'N/A')}</p>", unsafe_allow_html=True)
-            
-            st.markdown("### 📍 Location")
-            st.markdown(f"<p style='font-size: 1.3rem;'>{event.get('location', '-')}</p>", unsafe_allow_html=True)
-        
-        if event.get('raw_text'):
-            st.markdown("---")
-            st.markdown("### 📝 Original Input")
-            st.markdown(f"<p style='font-size: 1.6rem; line-height: 1.8; padding: 1rem; background: #f8f9fa; border-radius: 0.5rem; color: #2d3748;'>{event.get('raw_text', '')}</p>", unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        # Edit button
-        if st.button("✏️ แก้ไข", use_container_width=True, type="primary"):
-            st.session_state.editing_in_modal = event['id']
-            st.rerun()
+        slots['attendees'] = None
+    
+    return slots
 
-# Show dialog if event is selected
-if st.session_state.selected_event:
-    show_event_details()
 
-# Footer
-st.markdown("---")
-st.caption("💡 Tip: Try typing in Thai like 'พรุ่งนี้มีประชุมกับบีมตอน 10 โมง' or 'วันจันทร์นัดหมอ 3 โมง'")
+def create_event(slots: Dict[str, any], event_id: Optional[str] = None) -> Dict:
+    """Create a structured event from slots"""
+    if event_id is None:
+        event_id = f"evt_{uuid.uuid4().hex[:8]}"
+    
+    event = {
+        'id': event_id,
+        'date': slots.get('date'),
+        'time': slots.get('time'),
+        'description': slots.get('description'),
+        'attendees': slots.get('attendees'),
+        'location': slots.get('location'),
+        'raw_text': slots.get('raw_text', ''),
+        'created_at': get_current_datetime().isoformat()
+    }
+    
+    return event
+
+
+def load_events(filepath: str = EVENTS_FILE) -> List[Dict]:
+    """Load events from JSON file"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('events', [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_events(events: List[Dict], filepath: str = EVENTS_FILE):
+    """Save events to JSON file"""
+    print(f"DEBUG: Saving {len(events)} events to {filepath}")  # Debug
+    try:
+        data = {'events': events}
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"DEBUG: Successfully saved to {filepath}")  # Debug
+    except Exception as e:
+        print(f"DEBUG: Error saving events: {e}")  # Debug
+        raise
+
+
+def add_event(event: Dict, filepath: str = EVENTS_FILE):
+    """Add a new event to the file"""
+    events = load_events(filepath)
+    events.append(event)
+    save_events(events, filepath)
+    return event
+
+
+def delete_event(event_id: str, filepath: str = EVENTS_FILE):
+    """Delete an event by ID"""
+    events = load_events(filepath)
+    events = [e for e in events if e['id'] != event_id]
+    save_events(events, filepath)
+
+
+def update_event(event_id: str, updated_data: Dict, filepath: str = EVENTS_FILE):
+    """
+    Update an existing event by ID
+    
+    Args:
+        event_id: ID of event to update
+        updated_data: Dictionary with updated fields
+        filepath: Path to events file
+    """
+    events = load_events(filepath)
+    for i, event in enumerate(events):
+        if event['id'] == event_id:
+            # Preserve original metadata
+            original_created_at = event.get('created_at')
+            original_raw_text = event.get('raw_text')
+            
+            # Update fields
+            events[i].update(updated_data)
+            
+            # Ensure critical fields are preserved
+            events[i]['id'] = event_id
+            if original_created_at:
+                events[i]['created_at'] = original_created_at
+            if original_raw_text:
+                events[i]['raw_text'] = original_raw_text
+            events[i]['updated_at'] = get_current_datetime().isoformat()
+            
+            save_events(events, filepath)
+            return events[i]
+    return None
+
+
+def process_text_to_event(text: str, nlp_model=None, save_to_file: bool = False) -> Dict:
+    """
+    Complete pipeline: text → slots → validation → event
+    
+    Returns event dict with additional validation metadata:
+    - 'is_valid': bool
+    - 'missing_fields': list of critical missing fields
+    - 'auto_filled': dict of fields that were auto-filled
+    """
+    from validation import validate_event_data, apply_safe_defaults
+    
+    # Extract slots
+    slots = extract_slots(text, nlp_model)
+    
+    # Validate and get safe defaults
+    is_valid, missing_fields, safe_defaults = validate_event_data(slots)
+    
+    # Apply safe defaults
+    slots_with_defaults = apply_safe_defaults(slots, safe_defaults)
+    
+    # Create event (without saving yet)
+    event = create_event(slots_with_defaults)
+    
+    # Add validation metadata
+    event['is_valid'] = is_valid
+    event['missing_fields'] = missing_fields
+    event['auto_filled'] = safe_defaults
+    
+    # Only save if explicitly requested AND validation passes
+    if save_to_file and is_valid:
+        add_event(event)
+    
+    return event
